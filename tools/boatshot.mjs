@@ -17,8 +17,19 @@ const ANGLES = {
   side: [[15, 2.6, 0.3], [0, 1.3, 0.3]],
   side2: [[-15, 2.6, 0.3], [0, 1.3, 0.3]],
   rear: [[-8.5, 5, -13], [0, 1.4, -1.2]],
-  top: [[4, 15, 1], [0, 0.5, 0]]
+  top: [[4, 15, 1], [0, 0.5, 0]],
+  bowdeck: [[4.2, 6.4, 12], [0, 1.2, 3.2]],
+  aftdeck: [[-3.6, 5.6, -11.5], [0, 1.4, -4.2]]
 };
+// 실제 게임 카메라: 시점 방향(배 진행 방향 기준 각도)만 바꾸고 게임이 카메라를 놓게 둔다
+const GAME_VIEWS = { game_back: 0, game_q: 0.85, game_front: 2.3 };
+async function gameViews(page, tag) {
+  for (const k in GAME_VIEWS) {
+    await page.evaluate(off => { const d = __dbg; d.Cam.yaw = d.player.heading + off; d.Cam.idleT = 0; d.advance(50, 1 / 60); d.Cam.yaw = d.player.heading + off; d.advance(10, 1 / 60); }, GAME_VIEWS[k]);
+    await page.waitForTimeout(400);
+    await page.screenshot({ path: out(tag + k) });
+  }
+}
 
 async function openPage(W, H, touch, lite) {
   const ctx = await browser.newContext({ viewport: { width: W, height: H }, hasTouch: touch, isMobile: touch });
@@ -28,7 +39,7 @@ async function openPage(W, H, touch, lite) {
   await page.addInitScript(lo => { try { localStorage.clear(); if (lo) localStorage.setItem('gr_boat_set_v1', JSON.stringify({ lo: 1 })); } catch {} }, lite);
   await page.route('**/three.min.js', r => r.fulfill({ body: three, contentType: 'application/javascript' }));
   await page.goto('file://' + file); await page.waitForTimeout(1800);
-  await page.evaluate(() => { const d = __dbg; d.CONFIG.quality.adaptive = false; d.beginGame(); d.advance(180, 1 / 60); d.clearEnemies && d.clearEnemies(); d.advance(30, 1 / 60); });
+  await page.evaluate(() => { const d = __dbg; d.CONFIG.quality.adaptive = false; d.beginGame(); d.advance(180, 1 / 60); });
   await page.waitForTimeout(500);
   return { ctx, page };
 }
@@ -37,6 +48,7 @@ async function pose(page, a, fov) {
   await page.evaluate(([cp, lp, fov]) => {
     window.__hold = true;
     const d = __dbg, r = d.player.root, cam = d.camera;
+    if (d.enemies.length && d.clearEnemies) d.clearEnemies();   // 근접 사진에 적이 끼지 않게 (게임은 멈춘 상태라 웨이브는 끝나지 않는다)
     document.querySelectorAll('body > *:not(canvas)').forEach(e => { if (e.tagName !== 'SCRIPT') e.style.visibility = 'hidden'; });
     r.updateMatrixWorld(true);
     const p = new THREE.Vector3(cp[0], cp[1], cp[2]).applyMatrix4(r.matrixWorld), t = new THREE.Vector3(lp[0], lp[1], lp[2]).applyMatrix4(r.matrixWorld);
@@ -49,6 +61,7 @@ async function pose(page, a, fov) {
 {
   const { ctx, page } = await openPage(1280, 720, false, false);
   await page.screenshot({ path: out('pc_game') });
+  await gameViews(page, 'pc_');
   await page.evaluate(() => __dbg.skinApply('base'));
   for (const k in ANGLES) { await pose(page, ANGLES[k], 38); await page.screenshot({ path: out('pc_' + k) }); }
   // 2) 스킨 전체 (SKINS 배열 순서대로)
