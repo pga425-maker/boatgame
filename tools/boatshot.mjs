@@ -19,7 +19,11 @@ const ANGLES = {
   rear: [[-8.5, 5, -13], [0, 1.4, -1.2]],
   top: [[4, 15, 1], [0, 0.5, 0]],
   bowdeck: [[4.2, 6.4, 12], [0, 1.2, 3.2]],
-  aftdeck: [[-3.6, 5.6, -11.5], [0, 1.4, -4.2]]
+  aftdeck: [[-3.6, 5.6, -11.5], [0, 1.4, -4.2]],
+  gun: [[3.4, 3.4, 8.6], [0, 2.0, 3.9]],
+  vls: [[2.0, 4.4, 3.8], [0, 1.2, 1.5]],
+  ciws: [[2.2, 4.4, 1.6], [0, 3.5, -0.6]],
+  launcher: [[2.8, 4.4, -1.3], [0, 2.9, -3.9]]
 };
 // 실제 게임 카메라: 시점 방향(배 진행 방향 기준 각도)만 바꾸고 게임이 카메라를 놓게 둔다
 const GAME_VIEWS = { game_back: 0, game_q: 0.85, game_front: 2.3 };
@@ -49,6 +53,11 @@ async function pose(page, a, fov) {
     window.__hold = true;
     const d = __dbg, r = d.player.root, cam = d.camera;
     if (d.enemies.length && d.clearEnemies) d.clearEnemies();   // 근접 사진에 적이 끼지 않게 (게임은 멈춘 상태라 웨이브는 끝나지 않는다)
+    // 무기는 정면을 보게 두고 VLS 덮개 두 칸을 연다 (전후 사진을 같은 자세로 비교하려고)
+    const P = d.player;
+    if (P.turretPivot) { P.turretPivot.rotation.y = 0; P.barrelPivot.rotation.x = -0.06; }
+    P.mgPivot.rotation.y = 0; if (P.launcher) P.launcher.rotation.y = 0;
+    if (P.vlsCells) P.vlsCells.forEach((c, i) => { c.pv.rotation.x = (i === 1 || i === 6) ? -1.95 : 0; });
     document.querySelectorAll('body > *:not(canvas)').forEach(e => { if (e.tagName !== 'SCRIPT') e.style.visibility = 'hidden'; });
     r.updateMatrixWorld(true);
     const p = new THREE.Vector3(cp[0], cp[1], cp[2]).applyMatrix4(r.matrixWorld), t = new THREE.Vector3(lp[0], lp[1], lp[2]).applyMatrix4(r.matrixWorld);
