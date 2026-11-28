@@ -876,7 +876,8 @@ function updateCamera(dt) {
   // 1인칭에서는 시야를 가리는 조종실과 지붕 위 장비를 숨기고 뱃머리와 포신만 남긴다
   Cam.fpE = e;                                        // 1인칭 정도(0~1): 기관총 효과를 줄이는 데 쓴다
   const show = !(e > 0.5 && P.alive);
-  if (P.cabin.visible !== show) { P.cabin.visible = show; P.mgMesh.visible = show; if (P.radar) P.radar.visible = show; }   // 내 배는 마스트 레이더가 없다
+  if (P.cabin.visible !== show) { P.cabin.visible = show; P.mgMesh.visible = show; if (P.radar) P.radar.visible = show; }   // 뒤 마스트 회전 레이더도 함께 숨긴다
+  if (P.launcher && P.launcher.visible !== show) P.launcher.visible = show;   // 격납고 지붕 위 발사대: 1인칭으로 뒤를 볼 때 시야를 가린다 (따로 확인해 새 게임에서도 어긋나지 않게)
 }
 
 /* ---------- 게임 진행 ---------- */

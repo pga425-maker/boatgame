@@ -109,6 +109,48 @@ GeoBuilder.prototype.wedge = function (w, h, d, x, y, z, col, frontRake, backRak
   _bm.makeTranslation(x, y, z);
   return this.add(g, col, _bm);
 };
+// 각진 기둥: 아래 다각형(bot, 높이 yb)과 위 다각형(top, 높이 yt)을 옆면으로 잇는다. 점은 [x, z], 개수가 같아야 한다
+// 볼록한 모양만 쓴다 (면 방향은 가운데에서 바깥을 보게 맞춘다). capTop이면 윗면도 덮는다
+GeoBuilder.prototype.loft = function (bot, top, yb, yt, col, capTop) {
+  const n = bot.length, T = [];
+  for (let i = 0; i < n; i++) {
+    const j = (i + 1) % n, a = [bot[i][0], yb, bot[i][1]], b = [bot[j][0], yb, bot[j][1]], c = [top[i][0], yt, top[i][1]], d = [top[j][0], yt, top[j][1]];
+    T.push([a, b, d], [a, d, c]);
+  }
+  if (capTop) for (let i = 1; i < n - 1; i++) T.push([[top[0][0], yt, top[0][1]], [top[i][0], yt, top[i][1]], [top[i + 1][0], yt, top[i + 1][1]]]);
+  let cx = 0, cy = (yb + yt) * 0.5, cz = 0;
+  for (const p of bot.concat(top)) { cx += p[0]; cz += p[1]; }
+  cx /= n * 2; cz /= n * 2;
+  const P = [];
+  for (const t of T) {
+    const [v0, v1, v2] = t, ux = v1[0] - v0[0], uy = v1[1] - v0[1], uz = v1[2] - v0[2], wx = v2[0] - v0[0], wy = v2[1] - v0[1], wz = v2[2] - v0[2];
+    const nx = uy * wz - uz * wy, ny = uz * wx - ux * wz, nz = ux * wy - uy * wx;
+    const mx = (v0[0] + v1[0] + v2[0]) / 3 - cx, my = (v0[1] + v1[1] + v2[1]) / 3 - cy, mz = (v0[2] + v1[2] + v2[2]) / 3 - cz;
+    const tri = nx * mx + ny * my + nz * mz < 0 ? [v0, v2, v1] : t;
+    for (const v of tri) P.push(v[0], v[1], v[2]);
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(P, 3)); g.computeVertexNormals();
+  return this.add(g, col);
+};
+// 지금까지 넣은 정점 수 (shade로 범위를 정할 때 쓴다)
+GeoBuilder.prototype.mark = function () { return this.p.length / 3; };
+// 정점 색 음영(간단한 그림자 흉내): from~to 정점 중 높이 y0에서 k배로 어둡고 y1로 갈수록 원래 색. y1 < y0이면 위쪽이 어둡다
+// 스킨 셰이더도 정점 색 밝기를 곱하므로 스킨 위에서도 은은하게 남는다
+GeoBuilder.prototype.shade = function (from, y0, y1, k, to) {
+  const n = to === undefined ? this.p.length / 3 : to;
+  for (let i = from; i < n; i++) {
+    let t = (this.p[i * 3 + 1] - y0) / (y1 - y0);
+    t = t < 0 ? 0 : (t > 1 ? 1 : t); t = t * t * (3 - 2 * t);
+    const f = k + (1 - k) * t;
+    this.c[i * 3] *= f; this.c[i * 3 + 1] *= f; this.c[i * 3 + 2] *= f;
+  }
+  return this;
+};
+// 모서리를 깎은 직사각형 (팔각형): 폭 ±xh, 앞뒤 z0~z1, 깎은 길이 c
+function chamferRect(xh, z0, z1, c) {
+  return [[-xh + c, z1], [xh - c, z1], [xh, z1 - c], [xh, z0 + c], [xh - c, z0], [-xh + c, z0], [-xh, z0 + c], [-xh, z1 - c]];
+}
 GeoBuilder.prototype.build = function () {
   const g = new THREE.BufferGeometry();
   g.setAttribute('position', new THREE.Float32BufferAttribute(this.p, 3));
@@ -121,6 +163,7 @@ GeoBuilder.prototype.build = function () {
 
 // 선체 단면: s = 0(선미) ~ 1(뱃머리). 뱃머리로 갈수록 좁아지고 갑판이 솟으며, 용골이 올라와 뾰족해진다
 function hullSection(m, s) {
+  if (m === MODELS.player) return hullSectionDD(m, s);
   const s0 = 0.36;
   const u = s <= s0 ? 0 : (s - s0) / (1 - s0);
   const sternIn = 1 - 0.09 * Math.pow(1 - Math.min(s / 0.3, 1), 2);
@@ -136,6 +179,236 @@ function hullSection(m, s) {
   };
 }
 function deckYAt(m, z) { return hullSection(m, clamp((z + m.L * 0.5) / m.L, 0, 1)).deckY; }
+
+// 내 배(현대 구축함풍) 선체 단면: 갑판 높이는 다른 배와 같은 식이라 포탑·함교 자리가 그대로다.
+// 뱃머리는 더 날카롭게 좁아지고, 옆면은 아래쪽이 크게 벌어지다가 꺾이는 선(너클)에서 거의 곧게 선다
+function hullSectionDD(m, s) {
+  const s0 = 0.34;
+  const u = s <= s0 ? 0 : (s - s0) / (1 - s0);
+  const sternIn = 1 - 0.06 * Math.pow(1 - Math.min(s / 0.25, 1), 2);
+  const deckHB = m.B * 0.5 * sternIn * Math.max(1 - Math.pow(u, 1.85), 0);
+  const keelY = -m.draft * (1 - 0.92 * Math.pow(u, 3.2));
+  const chineY = -m.draft * 0.3 + (m.free * 0.5 + m.draft * 0.3) * Math.pow(u, 2.0);
+  const sheerY = m.free * (1 + m.bowRise * Math.pow(u, 1.7));
+  const kY = chineY + (sheerY - chineY) * 0.52;
+  const chineHB = deckHB * (0.8 - 0.3 * Math.pow(u, 1.3)), kHB = chineHB + (deckHB - chineHB) * 0.82;
+  const zBase = -m.L * 0.5 + s * m.L, rake = m.rake * u * u, zAt = function (y) { return zBase + rake * (y - keelY) / (sheerY - keelY); };
+  return {
+    deckHB: deckHB, chineHB: chineHB, inHB: Math.max(deckHB - 0.11, 0), kHB: kHB, kY: kY,
+    keelY: keelY, chineY: chineY, sheerY: sheerY, deckY: sheerY - m.bulwark,
+    zK: zBase, zC: zAt(chineY), zN: zAt(kY), zG: zBase + rake, s: s
+  };
+}
+// 바깥 외판 위의 높이 y 지점: [x, y, z]
+// 용골~너클은 차인을 조절점으로 한 둥근 곡선(2차 베지어)이라 배 밑이 매끄럽고, 너클 위는 곧은 판이다
+function ddSideAt(sec, y) {
+  const y0 = sec.keelY, y1 = sec.chineY, y2 = sec.kY;
+  if (y <= y0) return [0, y0, sec.zK];
+  if (y <= y2) {
+    const a = y0 - 2 * y1 + y2, b = 2 * (y1 - y0), c = y0 - y;
+    const t = clamp(Math.abs(a) < 1e-6 ? -c / b : (-b + Math.sqrt(Math.max(b * b - 4 * a * c, 0))) / (2 * a), 0, 1), u = 1 - t;
+    return [2 * t * u * sec.chineHB + t * t * sec.kHB, y, u * u * sec.zK + 2 * t * u * sec.zC + t * t * sec.zN];
+  }
+  if (y >= sec.sheerY) return [sec.deckHB, sec.sheerY, sec.zG];
+  const f = (y - y2) / Math.max(sec.sheerY - y2, 1e-6);
+  return [sec.kHB + (sec.deckHB - sec.kHB) * f, y, sec.zN + (sec.zG - sec.zN) * f];
+}
+// 뱃머리 쪽 갑판을 둘러싼 높은 현장(불워크) 높이: 스텔스 군함처럼 앞갑판을 막힌 벽으로 감싼다
+function ddBowWall(s) { const t = clamp((s - 0.76) / 0.1, 0, 1); return 0.5 * t * t * (3 - 2 * t); }
+
+// 외판 이음선(세로) 위치와 폭: 선체 면에 좁은 칸을 끼워 조금 어둡게 칠한다
+const DD_FRAMES = [-5.6, -4.2, -2.8, -1.4, 0, 1.4, 2.8], DD_SEAM = 0.03;
+function addHullDD(gb, m, pal) {
+  // 단면 위치: 고른 간격 48칸 + 세로 이음선마다 좁은 칸
+  const seamS = DD_FRAMES.map(function (z) { return (z + m.L * 0.5) / m.L; }), sl = [];
+  for (let i = 0; i <= 48; i++) sl.push(i / 48);
+  for (const s of seamS) sl.push(s, s + DD_SEAM / m.L);
+  sl.sort(function (a, b) { return a - b; });
+  const S = [];
+  for (const s of sl) if (!S.length || s - S[S.length - 1] > 1e-4) S.push(s);
+  const NS = S.length - 1, secs = S.map(function (s) { return hullSectionDD(m, s); });
+  const seamCol = S.map(function (s) { return seamS.some(function (q) { return Math.abs(q - s) < 1e-6; }); });
+  const bootTop = sRGB(0x1a1d20), seam = sRGB(0x5f6a73), bottom2 = sRGB(0x5e1c17);
+  seam.paint = 1;                                         // 스킨을 입혀도 정점 색 밝기만큼 은은하게 어둡게 남는다
+  const WL0 = -0.08, WL1 = 0.22;
+  // 아래 묶음(용골~너클, 둥근 면): 선저 3줄, 흘수선 띠, 옆면, 가로 이음선, 옆면
+  const lowY = function (s) {
+    const ky = s.keelY, w0 = Math.max(WL0, ky), w1 = Math.max(WL1, ky), m0 = w1 + (s.kY - w1) * 0.5;
+    return [ky, ky + (w0 - ky) * 0.4, ky + (w0 - ky) * 0.75, w0, w1, m0, m0 + 0.03, s.kY];
+  };
+  const lowCol = [pal.bottom, bottom2, pal.bottom, bootTop, pal.hull, seam, pal.hull];
+  // 위 묶음(너클~현측 끝, 곧은 판): 옆면, 가로 이음선, 옆면
+  const upY = function (s) { const u0 = s.kY + (s.sheerY - s.kY) * 0.42; return [s.kY, u0, u0 + 0.03, s.sheerY]; };
+  const upCol = [pal.hull, seam, pal.hull];
+  // 격자 면을 만든다: 점은 단면×높이, 법선은 이웃 점으로 구해 한 묶음 안에서는 매끄럽게 이어진다
+  function surface(ysOf, cols) {
+    const G = secs.map(function (s) { return ysOf(s).map(function (y) { return ddSideAt(s, y); }); }), R = G[0].length;
+    const N = G.map(function (col, i) {
+      return col.map(function (p, r) {
+        const A = G[Math.min(i + 1, NS)][r], B = G[Math.max(i - 1, 0)][r], C = col[Math.min(r + 1, R - 1)], D = col[Math.max(r - 1, 0)];
+        const tx = A[0] - B[0], ty = A[1] - B[1], tz = A[2] - B[2], px = C[0] - D[0], py = C[1] - D[1], pz = C[2] - D[2];
+        const nx = py * tz - pz * ty, ny = pz * tx - px * tz, nz = px * ty - py * tx, l = Math.sqrt(nx * nx + ny * ny + nz * nz);
+        return l > 1e-7 ? [nx / l, ny / l, nz / l] : [1, 0, 0];
+      });
+    });
+    const groups = new Map();
+    for (let i = 0; i < NS; i++) {
+      for (let r = 0; r < R - 1; r++) {
+        let col = cols[r];
+        if (seamCol[i] && col === pal.hull) col = seam;   // 세로 이음선은 회색 옆면에만
+        if (!groups.has(col)) groups.set(col, { P: [], N: [] });
+        const g = groups.get(col);
+        for (const [ii, jj] of [[i, r], [i, r + 1], [i + 1, r], [i, r + 1], [i + 1, r + 1], [i + 1, r]]) {
+          const p = G[ii][jj], n = N[ii][jj];
+          g.P.push(p[0], p[1], p[2], -p[0], p[1], p[2]); g.N.push(n[0], n[1], n[2], -n[0], n[1], n[2]);
+        }
+      }
+    }
+    // 위에서 좌현·우현 점을 번갈아 넣었으므로 쪽별로 나눠 삼각형 순서를 맞춘다
+    groups.forEach(function (g, col) {
+      for (const side of [0, 1]) {
+        const P = [], NN = [];
+        for (let k = side * 3; k < g.P.length; k += 6) { P.push(g.P[k], g.P[k + 1], g.P[k + 2]); NN.push(g.N[k], g.N[k + 1], g.N[k + 2]); }
+        const geo = new THREE.BufferGeometry();
+        geo.setAttribute('position', new THREE.Float32BufferAttribute(P, 3)); geo.setAttribute('normal', new THREE.Float32BufferAttribute(NN, 3));
+        gb.add(geo, col);
+      }
+    });
+    return G;
+  }
+  const GL = surface(lowY, lowCol), GU = surface(upY, upCol);
+  // 외판 한 줄 (i0~NS 구간): 갑판 가장자리·안쪽 벽·갑판처럼 단순한 띠 (오른쪽·왼쪽 대칭)
+  function strake(getA, getB, col, i0) {
+    i0 = i0 || 0;
+    const P = [], I = [], P2 = [], I2 = [];
+    for (let i = i0; i <= NS; i++) {
+      const a = getA(i), b = getB(i);
+      P.push(a[0], a[1], a[2], b[0], b[1], b[2]);
+      P2.push(-a[0], a[1], a[2], -b[0], b[1], b[2]);
+    }
+    for (let i = 0; i < NS - i0; i++) {
+      const a0 = i * 2, b0 = a0 + 1, a1 = a0 + 2, b1 = a0 + 3;
+      I.push(a0, b0, a1, b0, b1, a1);
+      I2.push(a0, a1, b0, b0, a1, b1);
+    }
+    for (const [PP, II] of [[P, I], [P2, I2]]) {
+      const g = new THREE.BufferGeometry();
+      g.setAttribute('position', new THREE.Float32BufferAttribute(PP, 3)); g.setIndex(II); g.computeVertexNormals();
+      gb.add(g, col);
+    }
+  }
+  const SH = function (i) { return [secs[i].deckHB, secs[i].sheerY, secs[i].zG]; };
+  strake(SH, function (i) { return [secs[i].inHB, secs[i].sheerY, secs[i].zG]; }, pal.dark);
+  strake(function (i) { return [secs[i].inHB, secs[i].sheerY, secs[i].zG]; }, function (i) { return [secs[i].inHB, secs[i].deckY, secs[i].zG]; }, pal.hull2);
+  strake(function (i) { return [secs[i].inHB, secs[i].deckY, secs[i].zG]; }, function (i) { return [0, secs[i].deckY, secs[i].zG]; }, pal.deck);
+  // 앞갑판을 감싸는 높은 벽: 바깥면은 외판을 이어 올리고, 안쪽면과 윗면을 붙인다
+  let i0 = 0; while (i0 < NS && ddBowWall(secs[i0 + 1].s) <= 0) i0++;
+  const wTop = function (i) { const s = secs[i]; return [s.deckHB * 0.985, s.sheerY + ddBowWall(s.s), s.zG + 0.04 * ddBowWall(s.s)]; };
+  const wIn = function (i) { const t = wTop(i); return [Math.max(t[0] - 0.09, 0), t[1], t[2]]; };
+  strake(SH, wTop, pal.hull, i0);
+  strake(wTop, wIn, pal.dark, i0);
+  strake(wIn, function (i) { return [secs[i].inHB, secs[i].sheerY, secs[i].zG]; }, pal.hull2, i0);
+  // 선미판: 같은 높이의 좌우 점을 잇는 사각형 띠로 채워 색 띠가 섞이지 않게 한다 (이음선 줄은 옆면 색)
+  const tp = GL[0].concat(GU[0].slice(1)), tc = lowCol.concat(upCol).map(function (c) { return c === seam ? pal.hull : c; });
+  for (let j = 0; j < tp.length - 1; j++) {
+    const a = tp[j], b = tp[j + 1], g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.Float32BufferAttribute([a[0], a[1], a[2], -a[0], a[1], a[2], b[0], b[1], b[2], -a[0], a[1], a[2], -b[0], b[1], b[2], b[0], b[1], b[2]], 3));
+    g.setAttribute('normal', new THREE.Float32BufferAttribute([0, 0, -1, 0, 0, -1, 0, 0, -1, 0, 0, -1, 0, 0, -1, 0, 0, -1], 3));
+    gb.add(g, tc[j]);
+  }
+}
+
+// 갑판·선미·물밑 디테일 (선체 지오메트리에 합친다 → 그리기 호출 수는 그대로)
+function addDeckDetailsDD(gb, m, pal, white) {
+  const sec = function (z) { return hullSectionDD(m, clamp((z + m.L * 0.5) / m.L, 0, 1)); };
+  const steel = sRGB(0x8d969d), deckD = sRGB(0x30363b), bronze = sRGB(0x9a7436);
+  // 쌍기둥 볼라드(계선주): 받침판 + 위가 살짝 넓은 기둥 둘. 갑판 가장자리 안쪽, 양쪽
+  for (const z of [5.05, 1.0, -2.55, -6.05]) {
+    const s = sec(z), y = s.deckY, x = s.inHB - 0.26;
+    for (const sd of [1, -1]) {
+      gb.box(0.22, 0.04, 0.4, sd * x, y + 0.02, z, deckD);
+      gb.cyl(0.07, 0.055, 0.22, 6, sd * x, y + 0.13, z + 0.11, pal.dark);
+      gb.cyl(0.07, 0.055, 0.22, 6, sd * x, y + 0.13, z - 0.11, pal.dark);
+      // 현장(불워크)에 뚫린 줄 구멍(페어리드)
+      gb.box(0.05, 0.13, 0.26, sd * (s.inHB + 0.01), s.sheerY - 0.1, z, pal.dark);
+    }
+  }
+  // 버섯 모양 환기구
+  for (const [x, z] of [[1.05, 2.45], [-1.05, 2.45], [1.65, -3.2], [-1.65, -3.2]]) {
+    const y = sec(z).deckY;
+    gb.cyl(0.07, 0.08, 0.26, 6, x, y + 0.13, z, pal.trim);
+    gb.cyl(0.14, 0.12, 0.07, 6, x, y + 0.29, z, pal.dark);
+  }
+  // 갑판 해치: 테두리 + 뚜껑 + 손잡이
+  for (const [x, z, w, d] of [[0, 2.42, 0.5, 0.36], [0, 5.05, 0.4, 0.32], [1.6, 0.25, 0.34, 0.5], [-1.6, 0.25, 0.34, 0.5]]) {
+    const y = sec(z).deckY;
+    gb.box(w + 0.08, 0.03, d + 0.08, x, y + 0.015, z, pal.dark);
+    gb.box(w, 0.05, d, x, y + 0.04, z, pal.trim);
+    gb.box(w * 0.5, 0.03, 0.04, x, y + 0.08, z - d * 0.3, steel);
+  }
+  // 뱃머리 끝 깃대(잭스태프)와 정박등
+  { const s = hullSectionDD(m, 0.985), y = s.sheerY + ddBowWall(0.985); gb.rod(0, y - 0.05, s.zG - 0.05, 0, y + 0.75, s.zG + 0.05, 0.022, pal.rail, 4); gb.box(0.07, 0.07, 0.07, 0, y + 0.78, s.zG + 0.05, white); }
+  // 닻줄 받침(체인 스토퍼)과 닻줄이 들어가는 구멍
+  for (const sd of [1, -1]) { const z = 5.95, y = sec(z).deckY; gb.box(0.12, 0.08, 0.32, sd * 0.2, y + 0.04, z, steel); gb.cyl(0.07, 0.07, 0.03, 8, sd * 0.15, sec(6.22).deckY + 0.015, 6.22, pal.dark); }
+  // 선미: 계류 갑판 개구부(어두운 구멍), 선미등, 양쪽 승선 사다리
+  {
+    const s = hullSectionDD(m, 0), z = s.zK - 0.016, top = s.deckY - 0.04;
+    gb.box(2.5, 0.42, 0.02, 0, top - 0.21, z, pal.dark);                          // 개구부
+    gb.box(2.6, 0.05, 0.03, 0, top + 0.01, z - 0.005, pal.hull2);                  // 개구부 위 턱
+    gb.box(0.12, 0.08, 0.06, 0, s.sheerY + 0.06, z - 0.01, white);                // 선미등
+    for (const sd of [1, -1]) {
+      const x = sd * 1.6, y0 = 0.25, y1 = s.sheerY - 0.05;
+      gb.rod(x - 0.11, y0, z - 0.04, x - 0.11, y1, z - 0.04, 0.018, steel, 4);
+      gb.rod(x + 0.11, y0, z - 0.04, x + 0.11, y1, z - 0.04, 0.018, steel, 4);
+      for (let k = 0; k < 5; k++) { const y = y0 + 0.08 + k * (y1 - y0 - 0.12) / 4; gb.rod(x - 0.11, y, z - 0.04, x + 0.11, y, z - 0.04, 0.014, steel, 3); }
+    }
+  }
+  // 흘수 눈금(드래프트 마크): 뱃머리와 선미 외판의 흰 눈금
+  for (const sd of [1, -1]) {
+    for (const [z, k] of [[6.05, 0], [-6.55, 1]]) {
+      for (let j = 0; j < 4; j++) { const y = 0.3 + j * 0.16; ddHullPlate(gb, m, sd, z, y, j % 2 ? 0.07 : 0.14, 0.035, white); }
+      if (k) ddHullPlate(gb, m, sd, z + 0.12, 0.62, 0.035, 0.5, white);
+    }
+  }
+  // 물밑: 용골 핀(스케그), 쌍 추진축·프로펠러·방향타
+  {
+    const s = sec(-4.5);
+    gb.box(0.07, 0.3, 3.2, 0, s.keelY - 0.1, -4.6, pal.bottom);
+    for (const sd of [1, -1]) {
+      const x = sd * 0.62, yb = sec(-5.3).keelY * 0.75;
+      gb.rod(x, yb + 0.15, -3.2, x, yb - 0.12, -6.0, 0.045, steel, 5);             // 추진축
+      for (let b = 0; b < 3; b++) { const a = b * TAU / 3 + sd * 0.4; gb.box(0.05, 0.26, 0.09, x + Math.cos(a) * 0.13, yb - 0.12 + Math.sin(a) * 0.13, -6.0, bronze, 0, 0.5 * sd, a + Math.PI / 2); }
+      gb.box(0.05, 0.5, 0.42, x, yb - 0.1, -6.45, pal.bottom);                     // 방향타
+    }
+  }
+}
+// 외판에 붙이는 얇은 판 (닻 자리·함번 숫자): 그 자리 외판 기울기에 맞춰 눕힌다. side: 1 좌현(+X), -1 우현
+function ddHullPlate(gb, m, side, z, y, w, h, col, lift) {
+  lift = lift || 0;
+  // 외판은 뱃머리 쪽에서 앞으로 기울어 있으므로, 높이 yy에서 실제로 zz에 오는 단면을 몇 번 고쳐 찾는다
+  const at = function (zz, yy) {
+    let s = clamp((zz + m.L * 0.5) / m.L, 0, 1), p = null;
+    for (let k = 0; k < 4; k++) { p = ddSideAt(hullSectionDD(m, s), yy); s = clamp(s - (p[2] - zz) / m.L, 0, 1); }
+    return p[0];
+  };
+  const x = at(z, y), dxdy = (at(z, y + 0.05) - at(z, y - 0.05)) / 0.1, dxdz = (at(z + 0.1, y) - at(z - 0.1, y)) / 0.2;
+  gb.box(0.025, h, w, side * (x + 0.012 + lift), y, z, col, 0, side * Math.atan(dxdz), -side * Math.atan(dxdy));
+}
+// 현측 함번 (7획 숫자). 바깥에서 볼 때 왼쪽에서 오른쪽으로 읽히게 쪽마다 방향을 바꾼다
+const DD_SEG = { 0: 'abcdef', 1: 'bc', 2: 'abged', 3: 'abgcd', 4: 'fgbc', 5: 'afgcd', 6: 'afgedc', 7: 'abc', 8: 'abcdefg', 9: 'abcfgd' };
+function ddHullNumber(gb, m, text, zc, yc, col) {
+  const W = 0.24, H = 0.42, T = 0.055, gap = 0.34;
+  const seg = { a: [0, H / 2, W, T], d: [0, -H / 2, W, T], g: [0, 0, W, T], b: [W / 2, H / 4, T, H / 2], c: [W / 2, -H / 4, T, H / 2], f: [-W / 2, H / 4, T, H / 2], e: [-W / 2, -H / 4, T, H / 2] };
+  for (const side of [1, -1]) {
+    for (let k = 0; k < text.length; k++) {
+      const uc = (k - (text.length - 1) / 2) * gap;
+      for (const c of DD_SEG[text[k]]) {
+        const sg = seg[c], u = uc + sg[0];
+        ddHullPlate(gb, m, side, zc - side * u, yc + sg[1], sg[2], sg[3], col);
+      }
+    }
+  }
+}
 
 function addHull(gb, m, pal) {
   const NS = 22, secs = [];
@@ -187,7 +460,7 @@ function addHull(gb, m, pal) {
 }
 
 // 갑판 가장자리를 따라 난간을 세운다
-function addRails(gb, m, col, s0, s1, count, h) {
+function addRails(gb, m, col, s0, s1, count, h, openBow) {
   let px = 0, py = 0, pz = 0, has = false, fx = 0, fy = 0, fz = 0;
   for (let i = 0; i <= count; i++) {
     const sec = hullSection(m, s0 + (s1 - s0) * i / count);
@@ -202,7 +475,7 @@ function addRails(gb, m, col, s0, s1, count, h) {
     } else { fx = x; fy = y; fz = z; }
     px = x; py = y; pz = z; has = true;
   }
-  gb.rod(-px, py + h, pz, px, py + h, pz, 0.024, col, 4);   // 뱃머리 쪽을 닫는다
+  if (!openBow) gb.rod(-px, py + h, pz, px, py + h, pz, 0.024, col, 4);   // 뱃머리 쪽을 닫는다 (앞 현장이 있으면 열어 둔다)
   gb.rod(-fx, fy + h, fz, fx, fy + h, fz, 0.024, col, 4);   // 선미 쪽을 닫는다
 }
 
@@ -237,84 +510,204 @@ function addTurret(tur, bar, pal, k) {
 function buildPlayerModel() {
   const m = MODELS.player, pal = PAL.player;
   const hull = new GeoBuilder(), cabin = new GeoBuilder(), tur = new GeoBuilder(), bar = new GeoBuilder(), mg = new GeoBuilder(), lch = new GeoBuilder();
-  addHull(hull, m, pal);
-  const zT = 3.75, dT = deckYAt(m, zT), zV = 1.5, dV = deckYAt(m, zV), zB = -1.0, dB = deckYAt(m, zB), zL = -5.1, dL = deckYAt(m, zL);
+  const hm0 = hull.mark();
+  addHullDD(hull, m, pal);
+  hull.shade(hm0, 0.2, 1.05, 0.84);                                                 // 외판: 물 쪽이 살짝 어둡다
+  const zT = 3.75, dT = deckYAt(m, zT), zV = 1.5, dV = deckYAt(m, zV), zB = -1.0, dB = deckYAt(m, zB);
   const canvas = sRGB(0xd9d2bf), red = sRGB(0x8c2a22), white = sRGB(0xe9edf0);
   // 앞갑판: 포탑 받침, 양묘기와 닻줄, 계선주, 파도막이
   hull.cyl(0.98, 1.04, 0.24, 24, 0, dT + 0.12, zT, pal.gun);
-  const dA = deckYAt(m, 5.7);
-  hull.cyl(0.17, 0.17, 0.28, 10, 0.32, dA + 0.14, 5.7, pal.dark); hull.cyl(0.17, 0.17, 0.28, 10, -0.32, dA + 0.14, 5.7, pal.dark);
-  hull.rod(0.32, dA + 0.05, 5.7, 0.22, deckYAt(m, 6.4) + 0.04, 6.4, 0.05, pal.dark, 5);
-  hull.rod(-0.32, dA + 0.05, 5.7, -0.22, deckYAt(m, 6.4) + 0.04, 6.4, 0.05, pal.dark, 5);
-  for (const z of [4.9, 2.4, -3.0, -5.9]) { const y = deckYAt(m, z), hb = hullSection(m, (z + m.L * 0.5) / m.L).inHB - 0.25; hull.cyl(0.07, 0.08, 0.2, 8, hb, y + 0.1, z, pal.dark); hull.cyl(0.07, 0.08, 0.2, 8, -hb, y + 0.1, z, pal.dark); }
+  const dA = deckYAt(m, 5.5);
+  hull.cyl(0.15, 0.15, 0.26, 10, 0.26, dA + 0.13, 5.5, pal.dark); hull.cyl(0.15, 0.15, 0.26, 10, -0.26, dA + 0.13, 5.5, pal.dark);
+  hull.rod(0.26, dA + 0.05, 5.5, 0.16, deckYAt(m, 6.25) + 0.04, 6.25, 0.045, pal.dark, 5);
+  hull.rod(-0.26, dA + 0.05, 5.5, -0.16, deckYAt(m, 6.25) + 0.04, 6.25, 0.045, pal.dark, 5);
   hull.rod(-0.9, dT + 0.05, zT - 1.25, 0, dT + 0.32, zT - 1.65, 0.05, pal.hull2, 4);
   // 수직 발사관 받침판 (덮개는 따로 움직이는 부품)
   hull.box(1.56, 0.1, 1.1, 0, dV + 0.05, zV, pal.dark);
-  // 함체 옆 닻 (뱃머리 양쪽)
-  for (const s of [1, -1]) { const sc = hullSection(m, (5.9 + m.L * 0.5) / m.L); hull.box(0.06, 0.32, 0.4, s * (sc.deckHB * 0.86 + 0.02), sc.sheerY - 0.42, 5.9, pal.dark, 0, 0, s * 0.25); }
-  // 흘수선 위 검은 띠 (실제 군함의 수선 띠)
-  const wl = function (sc) { const f = clamp((0.12 - sc.chineY) / (sc.sheerY - sc.chineY), 0, 1); return [sc.chineHB + (sc.deckHB - sc.chineHB) * f + 0.02, sc.chineY + (sc.sheerY - sc.chineY) * f, sc.zC + (sc.zG - sc.zC) * f]; };
-  for (let i = 0; i < 21; i++) {
-    const a = wl(hullSection(m, i / 22)), b = wl(hullSection(m, (i + 1) / 22));
-    hull.rod(a[0], a[1], a[2], b[0], b[1], b[2], 0.07, pal.dark, 5);
-    hull.rod(-a[0], a[1], a[2], -b[0], b[1], b[2], 0.07, pal.dark, 5);
+  // VLS 둘레 턱, 가운데 배기 띠, 칸마다 발사관 구멍과 미사일 머리 (덮개가 열리면 보인다)
+  for (const s of [1, -1]) { hull.box(0.05, 0.06, 1.16, s * 0.81, dV + 0.1, zV, pal.trim); hull.box(1.66, 0.06, 0.05, 0, dV + 0.1, zV + s * 0.575, pal.trim); }
+  hull.box(1.4, 0.03, 0.06, 0, dV + 0.115, zV, pal.trim);
+  const cellDark = sRGB(0x0c0e10), cellCap = sRGB(0xc9cdd0);
+  for (let r = 0; r < 2; r++) for (let c = 0; c < 4; c++) {
+    const cx = (c - 1.5) * 0.36, cz = zV + (r - 0.5) * 0.5;
+    hull.box(0.26, 0.006, 0.34, cx, dV + 0.103, cz, cellDark);
+    hull.box(0.12, 0.008, 0.12, cx, dV + 0.108, cz, cellCap);
   }
-  addRails(hull, m, pal.rail, 0.02, 0.93, 14, 0.7);
-  addFlag(hull, m, pal, 1.6);
+  // 함체 옆 닻 자리 (뱃머리 양쪽 외판에 붙은 닻 받침과 닻)
+  const steel = sRGB(0x9aa3aa);     // 스킨이 칠하지 않는 쇠 색
+  for (const s of [1, -1]) {
+    const sc = hullSectionDD(m, (5.6 + m.L * 0.5) / m.L), y = sc.kY + (sc.sheerY - sc.kY) * 0.45;
+    ddHullPlate(hull, m, s, 5.6, y, 0.46, 0.4, pal.dark);                  // 움푹한 닻 자리
+    ddHullPlate(hull, m, s, 5.6, y + 0.02, 0.06, 0.28, steel, 0.02);  // 닻 자루
+    ddHullPlate(hull, m, s, 5.6, y - 0.12, 0.26, 0.06, steel, 0.02);  // 닻 팔
+    ddHullPlate(hull, m, s, 5.6, y + 0.15, 0.14, 0.05, steel, 0.02);  // 닻 고리
+  }
+  // 현측 함번: VLS 옆 너클 위 외판 (상어 입 스킨의 눈·입 자리를 피해 뒤쪽에 둔다)
+  { const sc = hullSectionDD(m, (2.2 + m.L * 0.5) / m.L); ddHullNumber(hull, m, '715', 2.2, sc.kY + (sc.sheerY - sc.kY) * 0.5, white); }
+  addDeckDetailsDD(hull, m, pal, white);
+  // 난간은 높은 앞 현장이 시작되는 곳까지 (그 앞은 벽이 막아 준다)
+  addRails(hull, m, pal.rail, 0.02, 0.8, 12, 0.7, true);
 
-  // 아래 상부구조물: 옆면이 안으로 기운 스텔스 상자
-  cabin.wedge(2.7, 1.25, 3.6, 0, dB + 0.625, zB, pal.cabin, 0.35, 0.15, 0.10);
-  // 함교: 앞으로 비스듬한 유리창 줄
+  // ===== 상부 구조물 (2단계) =====
+  // 1층 상부구조물: 옆면이 안으로 기운 스텔스 상자. 뒤쪽 끝은 격납고와 맞닿는다
+  const D1z0 = -2.9, D1z1 = 0.8, D1H = 1.25;
+  const cm0 = cabin.mark();
+  cabin.wedge(2.7, D1H, D1z1 - D1z0, 0, dB + D1H * 0.5, (D1z0 + D1z1) * 0.5, pal.cabin, 0.35, 0, 0.1);
+  cabin.shade(cm0, dB, dB + 0.7, 0.7);                                               // 갑판에 붙은 아랫부분을 어둡게
+  // 함교: 앞으로 비스듬한 유리창 줄, 창틀, 위 차양, 함교 날개 (함교 크기·눈 위치는 그대로)
   const bz = -1.2, bL = 2.1, bH = 0.85, by0 = dB + 1.25, rk = 0.45;
+  const cm1 = cabin.mark();
   cabin.wedge(2.3, bH, bL, 0, by0 + bH * 0.5, bz, pal.cabin, rk, 0.1, 0.12);
+  cabin.shade(cm1, by0, by0 + 0.35, 0.8);
   const fz = bz + bL * 0.5, sl = Math.atan2(rk, bH);
   cabin.box(1.86, 0.3, 0.04, 0, by0 + bH * 0.62, fz - rk * 0.62 + 0.025, pal.glass, -sl);
+  for (let k = -2; k <= 2; k++) cabin.box(0.04, 0.32, 0.05, k * 0.36, by0 + bH * 0.62, fz - rk * 0.62 + 0.04, pal.roof, -sl);   // 창틀
+  cabin.box(2.05, 0.05, 0.3, 0, by0 + bH * 0.84, fz - rk * 0.84 + 0.12, pal.roof);                                         // 창 위 차양
   for (const s of [1, -1]) {
     cabin.box(0.04, 0.24, 1.3, s * 1.07, by0 + bH * 0.62, bz + 0.2, pal.glass, 0, 0, s * 0.16);
     cabin.box(0.5, 0.06, 0.5, s * 1.3, by0 + 0.03, bz + 0.6, pal.hull2);           // 함교 날개
+    cabin.box(0.04, 0.3, 0.5, s * 1.53, by0 + 0.2, bz + 0.6, pal.hull2);           // 날개 가림벽
+    cabin.rod(s * 1.32, by0 + 0.06, bz + 0.72, s * 1.32, by0 + 0.3, bz + 0.72, 0.025, pal.dark, 4);   // 탐조등 받침
+    cabin.cyl(0.08, 0.08, 0.16, 8, s * 1.32, by0 + 0.36, bz + 0.74, pal.roof, Math.PI / 2);         // 탐조등
+    cabin.cyl(0.065, 0.065, 0.02, 8, s * 1.32, by0 + 0.36, bz + 0.83, sRGB(0xdfe8ee), Math.PI / 2);
   }
   cabin.box(2.1, 0.06, 1.6, 0, by0 + bH + 0.03, bz - 0.22, pal.roof);
-  // 통합 마스트: 위로 좁아지는 피라미드에 평판 레이더 네 장
-  const mz = -1.75, my0 = by0 + bH + 0.06, mH = 1.5;
-  cabin.wedge(1.2, mH, 1.1, 0, my0 + mH * 0.5, mz, pal.cabin, 0.28, 0.28, 0.55);
-  cabin.box(0.62, 0.55, 0.05, 0, my0 + 0.62, mz + 0.43, pal.dark, -0.18);
-  cabin.box(0.62, 0.55, 0.05, 0, my0 + 0.62, mz - 0.43, pal.dark, 0.18);
-  cabin.box(0.05, 0.55, 0.62, 0.42, my0 + 0.62, mz, pal.dark, 0, 0, 0.27);
-  cabin.box(0.05, 0.55, 0.62, -0.42, my0 + 0.62, mz, pal.dark, 0, 0, -0.27);
-  // 꼭대기는 낮게: 1인칭 시야를 가리지 않게 짧은 안테나와 작은 돔만
-  cabin.rod(0, my0 + mH, mz, 0, my0 + mH + 0.35, mz, 0.04, pal.dark, 6);
-  cabin.rod(-0.45, my0 + mH + 0.18, mz, 0.45, my0 + mH + 0.18, mz, 0.022, pal.dark, 4);
-  cabin.cyl(0.1, 0.1, 0.12, 10, 0.42, my0 + mH + 0.24, mz, white); cabin.cyl(0.1, 0.1, 0.12, 10, -0.42, my0 + mH + 0.24, mz, white);
+  // 주 마스트: 위로 좁아지는 피라미드 탑 위에 공 모양 레이더 돔 (현대 방공 구축함의 상징)
+  const mz = -1.75, my0 = by0 + bH + 0.06, mH = 1.15;
+  const cm2 = cabin.mark();
+  cabin.wedge(1.2, mH, 1.1, 0, my0 + mH * 0.5, mz, pal.cabin, 0.26, 0.26, 0.55);
+  cabin.shade(cm2, my0, my0 + 0.4, 0.8);
+  cabin.box(0.5, 0.42, 0.04, 0, my0 + 0.45, mz + 0.44, pal.dark, -0.2);            // 전자전 안테나 판
+  cabin.box(0.5, 0.42, 0.04, 0, my0 + 0.45, mz - 0.44, pal.dark, 0.2);
+  cabin.cyl(0.2, 0.26, 0.14, 12, 0, my0 + mH + 0.07, mz, pal.roof);                 // 돔 받침
+  cabin.add(new THREE.SphereGeometry(0.34, 16, 10), white, new THREE.Matrix4().makeTranslation(0, my0 + mH + 0.42, mz));
+  cabin.cyl(0.35, 0.35, 0.03, 16, 0, my0 + mH + 0.42, mz, pal.roof);               // 돔 가운데 이음 띠
+  cabin.rod(0, my0 + mH + 0.75, mz, 0, my0 + mH + 1.0, mz, 0.025, pal.dark, 4);     // 피뢰침
+  cabin.rod(-0.55, my0 + 0.95, mz, 0.55, my0 + 0.95, mz, 0.022, pal.dark, 4);       // 활대
+  cabin.cyl(0.08, 0.08, 0.1, 10, 0.52, my0 + 1.01, mz, white); cabin.cyl(0.08, 0.08, 0.1, 10, -0.52, my0 + 1.01, mz, white);
   cabin.box(0.07, 0.1, 0.16, 1.37, by0 + 0.12, bz + 0.6, sRGB(0xff3a22));
   cabin.box(0.07, 0.1, 0.16, -1.37, by0 + 0.12, bz + 0.6, sRGB(0x22ff66));
-  // 굴뚝: 각진 스텔스 연돌과 검은 배기구
-  const cz = -3.35, cd = deckYAt(m, cz);
-  cabin.wedge(1.35, 1.75, 1.15, 0, cd + 0.875, cz, pal.cabin, 0.2, 0.3, 0.3);
-  cabin.box(0.8, 0.08, 0.55, 0, cd + 1.78, cz - 0.1, pal.dark);
-  // 구명정 통 (굴뚝 옆)
-  for (const s of [1, -1]) { cabin.cyl(0.22, 0.22, 0.8, 12, s * 1.25, cd + 0.3, cz + 0.1, white, Math.PI / 2); cabin.cyl(0.23, 0.23, 0.08, 12, s * 1.25, cd + 0.3, cz + 0.1, pal.dark, Math.PI / 2); }
-  // 함수 번호 대신 현측 앞쪽 흰 띠
-  for (const s of [1, -1]) { const sc = hullSection(m, (4.4 + m.L * 0.5) / m.L); cabin.box(0.03, 0.42, 0.11, s * (sc.deckHB * 0.93 + 0.03), sc.sheerY - 0.45, 4.4, white, 0, 0, s * 0.22); cabin.box(0.03, 0.42, 0.11, s * (sc.deckHB * 0.93 + 0.03), sc.sheerY - 0.45, 4.2, white, 0, 0, s * 0.22); }
+  // 굴뚝: 함교 뒤 1층 지붕 위의 각진 연돌, 위에 검은 배기구 둘과 뒤 마스트 받침대
+  const cz = -2.62, cH = 0.95;
+  const cm3 = cabin.mark();
+  cabin.wedge(0.95, cH, 0.56, 0, by0 + cH * 0.5, cz, pal.cabin, 0.12, 0.2, 0.22);
+  cabin.shade(cm3, by0, by0 + 0.3, 0.8).shade(cm3, by0 + cH, by0 + cH - 0.3, 0.55);   // 아래는 그림자, 꼭대기는 그을음
+  cabin.box(0.74, 0.12, 0.3, 0, by0 + cH - 0.06, cz - 0.05, pal.dark);
+  for (const s of [1, -1]) cabin.cyl(0.08, 0.09, 0.12, 8, s * 0.2, by0 + cH + 0.04, cz - 0.08, sRGB(0x16181a));
+  cabin.cyl(0.07, 0.09, 0.4, 8, 0, by0 + cH + 0.2, cz, pal.roof);                   // 회전 레이더 받침
+  // 깃발: 주 마스트 활대 좌현 끝에 단다 (비행갑판을 비우고, 회전 레이더·발사대가 닿지 않는 자리)
+  cabin.rod(0.55, my0 + 0.95, mz, 0.56, my0 + 0.62, mz - 0.1, 0.012, pal.rail, 3);
+  cabin.box(0.02, 0.22, 0.36, 0.56, my0 + 0.72, mz - 0.28, pal.accent);
+  // 1층 지붕 뒤쪽 양옆: 고속단정(RHIB)과 작은 기중기
+  for (const s of [1, -1]) {
+    const x = s * 0.86, z = -2.58, y = by0;
+    cabin.box(0.3, 0.06, 0.7, x, y + 0.05, z, pal.dark);                           // 받침
+    cabin.wedge(0.26, 0.12, 0.62, x, y + 0.14, z, sRGB(0x9aa1a6), 0.08, 0.02, -0.1);
+    cabin.cyl(0.07, 0.07, 0.6, 8, x + 0.12, y + 0.2, z, sRGB(0xc4581d), Math.PI / 2);
+    cabin.cyl(0.07, 0.07, 0.6, 8, x - 0.12, y + 0.2, z, sRGB(0xc4581d), Math.PI / 2);
+    cabin.rod(x + s * 0.18, y, z + 0.25, x + s * 0.05, y + 0.55, z + 0.25, 0.022, pal.rail, 4);
+    cabin.rod(x + s * 0.05, y + 0.55, z + 0.25, x - s * 0.08, y + 0.5, z, 0.018, pal.rail, 4);
+  }
+  // 1층 옆면: 출입문, 환기 그릴, 구명뗏목 통 세 개씩
+  for (const s of [1, -1]) {
+    const wx = function (h) { return s * (1.35 - 0.135 * h / D1H + 0.012); }, tilt = s * Math.atan(0.135 / D1H);
+    for (const z of [0.1, -2.35]) cabin.box(0.02, 0.62, 0.36, wx(0.38), dB + 0.38 + 0.02, z, pal.dark, 0, 0, tilt);
+    cabin.box(0.02, 0.22, 0.5, wx(0.9), dB + 0.9, -0.9, pal.trim, 0, 0, tilt);
+    for (let k = 0; k < 3; k++) cabin.cyl(0.11, 0.11, 0.42, 8, wx(0.78) + s * 0.12, dB + 0.78, -1.85 + k * 0.5, white, Math.PI / 2);
+  }
+  // 막대 안테나
+  for (const [x, z, h] of [[1.05, 0.25, 1.1], [-1.05, 0.25, 1.1]]) cabin.rod(x, by0, z, x * 1.05, by0 + h, z, 0.016, pal.dark, 3);
 
-  // 근접방어포(기관총): 흰 돔과 개틀링 포신
-  mg.cyl(0.3, 0.34, 0.26, 14, 0, 0.13, 0, pal.cabin);
+  // ----- 선체 쪽 (1인칭에서도 보임): 헬기 격납고, 비행갑판, 계단 -----
+  const hz0 = -2.9, hz1 = -4.6, hc = (hz0 + hz1) * 0.5, hydk = deckYAt(m, hc), hH = by0 - hydk;
+  const hm1 = hull.mark();
+  hull.wedge(2.5, hH, hz0 - hz1, 0, hydk + hH * 0.5, hc, pal.cabin, 0, 0, 0.08);
+  hull.shade(hm1, hydk, hydk + 0.6, 0.72);
+  // 격납고 문: 테두리, 밝은 접이식 문, 가로 줄
+  const door = sRGB(0xb3babf);
+  hull.box(2.02, 1.06, 0.02, 0, hydk + 0.53, hz1 - 0.012, pal.dark);
+  hull.box(1.9, 1.0, 0.03, 0, hydk + 0.52, hz1 - 0.02, door);
+  for (let k = 1; k < 7; k++) hull.box(1.9, 0.014, 0.012, 0, hydk + 0.02 + k * 0.143, hz1 - 0.04, sRGB(0x7d868c));
+  hull.box(2.5, 0.08, 0.06, 0, by0 - 0.04, hz1 - 0.02, pal.roof);                // 지붕 끝 턱
+  for (const s of [1, -1]) {
+    const tilt = s * Math.atan(0.1 / hH);
+    hull.box(0.02, 0.62, 0.34, s * (1.25 - 0.1 * 0.36 / hH + 0.012), hydk + 0.36, -3.3, pal.dark, 0, 0, tilt);   // 옆문
+    // 비행갑판에서 격납고 지붕으로 오르는 경사 계단: 옆판 두 줄 + 디딤판 + 손잡이
+    const x = s * 1.56, zb = -4.62, zt = -3.62, yb = deckYAt(m, zb), yt = by0;
+    hull.rod(x - 0.1, yb, zb, x - 0.1, yt, zt, 0.02, pal.dark, 4);
+    hull.rod(x + 0.1, yb, zb, x + 0.1, yt, zt, 0.02, pal.dark, 4);
+    for (let k = 1; k < 7; k++) { const f = k / 7; hull.box(0.22, 0.025, 0.09, x, yb + (yt - yb) * f, zb + (zt - zb) * f, pal.roof); }
+    hull.rod(x + s * 0.11, yb + 0.6, zb, x + s * 0.11, yt + 0.6, zt, 0.015, pal.rail, 3);
+  }
+  // 비행갑판: 미끄럼 방지 갑판 판, 흰 가장자리 선, 노란 착륙 원, 흰 H, 유도선, 갑판 가장자리 등
+  const fdz0 = hz1 - 0.08, fdz1 = -6.72, fdL = fdz0 - fdz1, fdc = (fdz0 + fdz1) * 0.5, fdy = deckYAt(m, fdc);
+  const fdeck = sRGB(0x2c3237), yel = sRGB(0xd9a514);
+  hull.box(3.7, 0.012, fdL, 0, fdy + 0.008, fdc, fdeck);
+  for (const s of [1, -1]) hull.box(0.06, 0.012, fdL, s * 1.72, fdy + 0.02, fdc, white);
+  hull.box(3.5, 0.012, 0.06, 0, fdy + 0.02, fdz1 + 0.05, white);
+  const tdz = -5.62;
+  hull.add(new THREE.RingGeometry(0.6, 0.7, 28), yel, new THREE.Matrix4().makeRotationX(-Math.PI / 2).setPosition(0, fdy + 0.024, tdz));
+  hull.box(0.07, 0.012, 0.56, 0.17, fdy + 0.028, tdz, white); hull.box(0.07, 0.012, 0.56, -0.17, fdy + 0.028, tdz, white); hull.box(0.34, 0.012, 0.07, 0, fdy + 0.028, tdz, white);
+  for (const z of [fdz0 - 0.2, fdz0 - 0.5]) hull.box(0.05, 0.012, 0.18, 0, fdy + 0.02, z, white);
+  for (const [x, z, c] of [[1.72, fdz0, yel], [-1.72, fdz0, yel], [1.72, fdc, sRGB(0x3fd46a)], [-1.72, fdc, sRGB(0x3fd46a)], [1.72, fdz1 + 0.1, yel], [-1.72, fdz1 + 0.1, yel]]) hull.box(0.08, 0.05, 0.08, x, fdy + 0.03, z, c);
+
+  // ----- 4단계 마무리: 작은 디테일 -----
+  // 난간에 건 주황색 구명튜브 (바깥을 보게)
+  const ringCol = sRGB(0xe2581f);
+  for (const [sd, z] of [[1, -1.6], [-1, -1.6], [1, -5.3], [-1, -5.3]]) {
+    const sc = hullSectionDD(m, (z + m.L * 0.5) / m.L), x = sd * (sc.inHB - 0.0);
+    hull.add(new THREE.TorusGeometry(0.11, 0.028, 4, 8), ringCol, new THREE.Matrix4().makeRotationY(Math.PI / 2).setPosition(x, sc.sheerY + 0.42, z));
+  }
+  // 현측 배수구와 그 아래 물 자국 (물 자국은 외판색보다 조금 어둡게, 스킨 위에서도 은은하게)
+  const streak = sRGB(0x5f6a73); streak.paint = 1;
+  for (const sd of [1, -1]) for (const z of [-5.4, -3.6, -1.9, -0.2, 1.2]) {
+    const sc = hullSectionDD(m, (z + m.L * 0.5) / m.L);
+    ddHullPlate(hull, m, sd, z, sc.sheerY - 0.12, 0.1, 0.05, pal.dark);
+    ddHullPlate(hull, m, sd, z, sc.sheerY - 0.36, 0.04, 0.4, streak);
+  }
+  // 격납고 지붕 뒤 모서리 막대 안테나 (발사대가 돌아도 닿지 않는 자리)
+  for (const sd of [1, -1]) hull.rod(sd * 1.12, by0, -4.55, sd * 1.16, by0 + 1.0, -4.58, 0.014, pal.dark, 3);
+
+  // 근접방어포(기관총): 받침·회전대·양팔, 흰 레이더 돔과 앞쪽 추적 레이더, 탄약통, 포신 6개 개틀링
+  // (총구 위치 mgMuzzle = (0, 0.55, 1.25)는 그대로)
+  mg.cyl(0.3, 0.34, 0.26, 12, 0, 0.13, 0, pal.cabin);
   mg.box(0.5, 0.3, 0.46, 0, 0.42, -0.05, pal.cabin);
+  mg.shade(0, 0, 0.3, 0.78);
+  for (const s of [1, -1]) mg.box(0.07, 0.34, 0.36, s * 0.23, 0.58, 0.04, pal.cabin);
   mg.cyl(0.25, 0.25, 0.5, 14, 0, 0.82, -0.12, white);
   mg.add(new THREE.SphereGeometry(0.25, 14, 7, 0, TAU, 0, Math.PI / 2), white, new THREE.Matrix4().makeTranslation(0, 1.07, -0.12));
+  mg.cyl(0.26, 0.26, 0.035, 14, 0, 0.58, -0.12, pal.roof);                         // 돔 아래 이음 띠
+  mg.cyl(0.11, 0.11, 0.035, 10, 0, 0.79, 0.14, pal.dark, Math.PI / 2);            // 추적 레이더 안테나
+  mg.cyl(0.11, 0.11, 0.38, 10, 0.02, 0.42, 0.16, pal.gun, Math.PI / 2);           // 탄약통
   mg.box(0.18, 0.18, 0.3, 0, 0.55, 0.28, pal.dark);
-  mg.cyl(0.08, 0.08, 0.9, 8, 0, 0.55, 0.78, pal.dark, Math.PI / 2);
-  mg.cyl(0.1, 0.1, 0.1, 8, 0, 0.55, 1.2, pal.dark, Math.PI / 2);
+  for (let k = 0; k < 6; k++) { const a = k * TAU / 6, ox = Math.cos(a) * 0.05, oy = Math.sin(a) * 0.05; mg.rod(ox, 0.55 + oy, 0.42, ox, 0.55 + oy, 1.21, 0.017, pal.dark, 4); }
+  mg.cyl(0.085, 0.085, 0.05, 8, 0, 0.55, 0.8, pal.gun, Math.PI / 2);               // 포신 묶음 띠
+  mg.cyl(0.09, 0.09, 0.07, 8, 0, 0.55, 1.17, pal.dark, Math.PI / 2);              // 포구 고정 띠
 
-  // 함포 포탑: 앞면이 비스듬한 장갑 포탑, 포신 두 개(포신 덮개 천 포함)
-  tur.wedge(1.85, 0.82, 2.15, 0, 0.47, -0.25, pal.turret, 0.38, 0.12, 0.14);
-  tur.box(1.5, 0.06, 1.2, 0, 0.9, -0.45, pal.hull2);
-  for (const s of [1, -1]) tur.box(0.34, 0.16, 0.36, s * 0.72, 0.78, -0.95, pal.dark);     // 포탑 위 관측창
-  tur.box(0.2, 0.2, 0.3, 0, 0.88, -1.05, pal.dark);
+  // 함포 포탑: 각진 스텔스형. 아래 띠는 살짝 벌어지고(꺾인 선), 위는 앞이 크게 누운 팔각 기둥
+  // 포신 축(barrelPos)·포신 간격(twin 0.3)·포구(muzzleZ 3.8)는 그대로
+  tur.cyl(0.9, 0.94, 0.1, 18, 0, 0.04, 0, pal.gun);                                 // 포탑 아래 링
+  const g0 = chamferRect(0.86, -1.28, 0.86, 0.3), g1 = chamferRect(0.92, -1.3, 0.8, 0.32), g2 = chamferRect(0.7, -1.1, 0.18, 0.24);
+  const tm0 = tur.mark();
+  tur.loft(g0, g1, 0.08, 0.34, pal.turret, false);
+  tur.loft(g1, g2, 0.34, 0.88, pal.turret, true);
+  tur.shade(tm0, 0.08, 0.5, 0.75);
+  const fa = Math.atan2(0.62, 0.54);                                                 // 앞면 기울기
+  tur.box(0.95, 0.3, 0.02, 0, 0.509, 0.624, pal.dark, -fa);                         // 포신이 나오는 창
+  for (const s of [1, -1]) tur.box(0.02, 0.02, 1.62, s * 0.925, 0.34, -0.25, pal.dark);   // 꺾인 선
+  tur.box(0.55, 0.18, 0.02, 0, 0.2, -1.3, pal.dark);                                // 뒤 탄피 배출구
+  tur.box(1.0, 0.025, 0.7, 0, 0.893, -0.5, pal.hull2);                             // 윗면 판
+  for (const s of [1, -1]) { tur.box(0.24, 0.13, 0.32, s * 0.4, 0.95, -0.72, pal.dark); tur.box(0.2, 0.06, 0.02, s * 0.4, 0.96, -0.555, pal.glass); }   // 조준경 덮개
+  tur.cyl(0.15, 0.15, 0.04, 10, 0, 0.905, -0.95, pal.gun);                         // 윗면 해치
+  tur.rod(-0.5, 0.88, -0.95, -0.52, 1.35, -1.0, 0.012, pal.dark, 3);                // 안테나
   for (const s of [1, -1]) {
-    bar.cyl(0.19, 0.21, 0.46, 12, s * 0.3, 0, 0.5, canvas, Math.PI / 2);
-    bar.cyl(0.11, 0.085, 3.0, 12, s * 0.3, 0, 2.2, pal.gun, Math.PI / 2);
-    bar.cyl(0.12, 0.12, 0.24, 12, s * 0.3, 0, 3.62, pal.gun, Math.PI / 2);
-    bar.cyl(0.07, 0.07, 0.05, 10, s * 0.3, 0, 3.75, pal.dark, Math.PI / 2);
+    const x = s * 0.3;
+    bar.cyl(0.19, 0.21, 0.46, 10, x, 0, 0.5, canvas, Math.PI / 2);                  // 포신 덮개 천
+    bar.cyl(0.105, 0.085, 3.0, 10, x, 0, 2.2, pal.gun, Math.PI / 2);
+    bar.cyl(0.13, 0.13, 0.42, 10, x, 0, 1.75, pal.gun, Math.PI / 2);                // 연기 배출기(볼록한 부분)
+    bar.cyl(0.12, 0.12, 0.24, 10, x, 0, 3.62, pal.gun, Math.PI / 2);                // 포구 제동기
+    for (const t of [1, -1]) bar.box(0.04, 0.07, 0.14, x + t * 0.115, 0, 3.62, pal.dark);   // 제동기 옆 구멍
+    bar.cyl(0.07, 0.07, 0.05, 10, x, 0, 3.75, pal.dark, Math.PI / 2);
   }
 
   // 상자형 미사일 발사대: 돌아가는 받침 위에 6구 발사관 두 개를 비스듬히
@@ -325,6 +718,11 @@ function buildPlayerModel() {
   const tubes = [];
   for (const s of [1, -1]) {
     const px = s * 0.37, py = 0.86, pz = 0.05;
+    // 발사관 묶음 띠 둘, 뒤 마개, 받침 유압 실린더 (발사관 위치 계산은 아래 그대로)
+    for (const t of [-0.55, 0.3]) lch.box(0.74, 0.66, 0.07, px, py + t * sa, pz + t * ca, pal.gun, -ang);
+    lch.box(0.7, 0.62, 0.05, px, py - 0.9 * sa, pz - 0.9 * ca, pal.dark, -ang);
+    lch.rod(px, 0.22, 0.55, px, 0.86, 0.55, 0.035, pal.rail, 5);
+    lch.rod(px, 0.22, 0.55, px, 0.52, 0.55, 0.06, pal.dark, 5);
     lch.box(0.68, 0.6, 1.8, px, py, pz, pal.cabin, -ang);
     lch.box(0.7, 0.08, 1.82, px, py + 0.32 * ca, pz - 0.32 * sa, pal.hull2, -ang);
     const fx = px, fy = py + 0.9 * sa, fzz = pz + 0.9 * ca;
@@ -337,12 +735,18 @@ function buildPlayerModel() {
     }
   }
 
+  // 뒤 마스트의 회전 레이더 (따로 도는 부품, 원점 = 받침대 꼭대기)
+  const rad = new GeoBuilder();
+  rad.cyl(0.06, 0.06, 0.12, 8, 0, 0.06, 0, pal.roof);
+  rad.box(0.68, 0.24, 0.05, 0, 0.26, 0.04, pal.dark, -0.22);
+  rad.box(0.6, 0.1, 0.12, 0, 0.2, -0.06, pal.roof);
+
   return {
-    hullGeo: hull.build(), cabinGeo: cabin.build(), turretGeo: tur.build(), barrelGeo: bar.build(), mgGeo: mg.build(), radarGeo: null,
+    hullGeo: hull.build(), cabinGeo: cabin.build(), turretGeo: tur.build(), barrelGeo: bar.build(), mgGeo: mg.build(), radarGeo: rad.build(),
     turretPos: new THREE.Vector3(0, dT + 0.24, zT), barrelPos: new THREE.Vector3(0, 0.5, 0.62), muzzleZ: 3.8, twin: 0.3,
     mgPos: new THREE.Vector3(0, by0 + bH + 0.06, bz + 0.45), mgMuzzle: new THREE.Vector3(0, 0.55, 1.25),
-    radarPos: new THREE.Vector3(0, my0 + mH + 1.0, mz), eyePos: new THREE.Vector3(0, by0 + bH + 0.32, fz - 0.05),
-    launcherGeo: lch.build(), launcherPos: new THREE.Vector3(0, dL, zL), launcherTubes: tubes, launcherDir: new THREE.Vector3(0, sa, ca),
+    radarPos: new THREE.Vector3(0, by0 + cH + 0.4, cz), eyePos: new THREE.Vector3(0, by0 + bH + 0.32, fz - 0.05),
+    launcherGeo: lch.build(), launcherPos: new THREE.Vector3(0, by0, -3.95), launcherTubes: tubes, launcherDir: new THREE.Vector3(0, sa, ca),
     vlsPos: new THREE.Vector3(0, dV + 0.1, zV)
   };
 }
@@ -682,7 +1086,8 @@ function Boat(kind) {
   if (T.vlsPos) {
     this.vls = new THREE.Group(); this.vls.position.copy(T.vlsPos); root.add(this.vls);
     this.vlsCells = [];
-    const hg = new GeoBuilder().box(0.3, 0.05, 0.4, 0, 0.025, 0.2, PAL.player.hull2).box(0.22, 0.012, 0.3, 0, 0.056, 0.2, PAL.player.dark).build();       // 덮개: 뒤쪽 경첩을 축으로 열린다
+    const hg = new GeoBuilder().box(0.3, 0.05, 0.4, 0, 0.025, 0.2, PAL.player.hull2).box(0.22, 0.012, 0.3, 0, 0.056, 0.2, PAL.player.dark)
+      .cyl(0.024, 0.024, 0.26, 5, 0, 0.025, 0, PAL.player.dark, 0, 0, Math.PI / 2).box(0.035, 0.018, 0.3, 0, 0.066, 0.2, PAL.player.gun).build();       // 덮개: 뒤쪽 경첩을 축으로 열린다 (경첩·가운데 살)
     for (let r = 0; r < 2; r++) for (let c = 0; c < 4; c++) {
       const pv = new THREE.Group(); pv.position.set((c - 1.5) * 0.36, 0, (r - 0.5) * 0.5 - 0.2); this.vls.add(pv);
       const hm = new THREE.Mesh(hg, boatMat); pv.add(hm); this.meshes.push(hm);
