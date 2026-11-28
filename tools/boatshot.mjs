@@ -52,7 +52,7 @@ async function pose(page, a, fov) {
   await page.evaluate(([cp, lp, fov]) => {
     window.__hold = true;
     const d = __dbg, r = d.player.root, cam = d.camera;
-    if (d.enemies.length && d.clearEnemies) d.clearEnemies();   // 근접 사진에 적이 끼지 않게 (게임은 멈춘 상태라 웨이브는 끝나지 않는다)
+    if (d.enemies.length && d.clearEnemies) { d.clearEnemies(); d.advance(1, 1 / 60); }   // 근접 사진에 적이 끼지 않게 (한 프레임만 진행해 체력바도 지운다)
     // 무기는 정면을 보게 두고 VLS 덮개 두 칸을 연다 (전후 사진을 같은 자세로 비교하려고)
     const P = d.player;
     if (P.turretPivot) { P.turretPivot.rotation.y = 0; P.barrelPivot.rotation.x = -0.06; }
